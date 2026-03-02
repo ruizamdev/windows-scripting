@@ -156,6 +156,7 @@ try {
     "custom-rendezvous-server" = $Rendezvous
     "relay-server" = $Relay
     "key" = $Key
+    "allow-remote-config-modification" = "Y"
   } @("stop-service")
 
   Write-Host "[9/9] Guardando archivo..."
