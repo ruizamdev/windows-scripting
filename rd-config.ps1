@@ -8,7 +8,7 @@ $Rendezvous = "TU_DOMINIO_O_IP"
 $Relay      = "TU_DOMINIO_O_IP"
 $Key        = "TU_PUBLIC_KEY"
 
-$cfgDir  = Join-Path $env:APPDATA "RustDesk"
+$cfgDir  = Join-Path (Join-Path $env:APPDATA "RustDesk") "config"
 $cfgFile = Join-Path $cfgDir "RustDesk2.toml"
 
 function Update-TomlOptions([string]$content, [hashtable]$updates) {
