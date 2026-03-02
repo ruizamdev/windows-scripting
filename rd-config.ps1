@@ -11,7 +11,7 @@ $Key        = "TU_PUBLIC_KEY"
 $cfgDir  = Join-Path (Join-Path $env:APPDATA "RustDesk") "config"
 $cfgFile = Join-Path $cfgDir "RustDesk2.toml"
 
-function Update-TomlOptions([string]$content, [hashtable]$updates) {
+function Update-TomlOptions([string]$content, [hashtable]$updates, [string[]]$removeKeys = @()) {
   $lines = @()
   if ($null -ne $content -and $content.Length -gt 0) {
     $lines = $content -split "`r?`n"
@@ -42,41 +42,74 @@ function Update-TomlOptions([string]$content, [hashtable]$updates) {
       $lines += "$k = ""$safe"""
     }
   } else {
+    $removeSet = @{}
+    foreach ($k in $removeKeys) { $removeSet[$k] = $true }
+
     $found = @{}
     foreach ($k in $updates.Keys) { $found[$k] = $false }
 
-    for ($i = $sectionStart + 1; $i -lt $sectionEnd; $i++) {
-      foreach ($k in $updates.Keys) {
-        if ($lines[$i] -match "^\s*$([regex]::Escape($k))\s*=") {
-          $safe = ([string]$updates[$k]).Replace("\", "\\").Replace('"', '\"')
-          $lines[$i] = "$k = ""$safe"""
-          $found[$k] = $true
+    [System.Collections.ArrayList]$list = @()
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+      if ($i -gt $sectionStart -and $i -lt $sectionEnd) {
+        $line = $lines[$i]
+        if ($line -match '^\s*([A-Za-z0-9_.-]+)\s*=') {
+          $currentKey = $matches[1]
+          if ($removeSet.ContainsKey($currentKey)) {
+            continue
+          }
+          if ($updates.ContainsKey($currentKey)) {
+            $safe = ([string]$updates[$currentKey]).Replace("\", "\\").Replace('"', '\"')
+            [void]$list.Add("$currentKey = ""$safe""")
+            $found[$currentKey] = $true
+            continue
+          }
         }
+        [void]$list.Add($line)
+      } else {
+        [void]$list.Add($lines[$i])
       }
     }
 
-    [System.Collections.ArrayList]$list = @($lines)
-    $insertAt = $sectionStart + 1
+    $headerIndex = -1
+    for ($i = 0; $i -lt $list.Count; $i++) {
+      if ($list[$i] -match '^\s*\[options\]\s*$') {
+        $headerIndex = $i
+        break
+      }
+    }
+    if ($headerIndex -lt 0) { $headerIndex = 0 }
+
+    $insertAt = $headerIndex + 1
     foreach ($k in $updates.Keys) {
       if (-not $found[$k]) {
         $safe = ([string]$updates[$k]).Replace("\", "\\").Replace('"', '\"')
         [void]$list.Insert($insertAt, "$k = ""$safe""")
         $insertAt++
-        $sectionEnd++
       }
     }
+
     $lines = @($list)
   }
 
   return ($lines -join "`r`n")
 }
 
+function Get-RustDeskService {
+  $svc = Get-Service -Name "RustDesk*" -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($null -eq $svc) {
+    $svc = Get-Service -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -like "*RustDesk*" -or $_.DisplayName -like "*RustDesk*" } |
+      Select-Object -First 1
+  }
+  return $svc
+}
+
 try {
   $ErrorActionPreference = "Stop"
 
-  Write-Host "[1/7] Iniciando configuracion de RustDesk..."
+  Write-Host "[1/9] Iniciando configuracion de RustDesk..."
 
-  Write-Host "[2/7] Verificando carpeta de configuracion..."
+  Write-Host "[2/9] Verificando carpeta de configuracion..."
   if (!(Test-Path $cfgDir)) {
     New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
     Write-Host "      Carpeta creada: $cfgDir"
@@ -84,10 +117,26 @@ try {
     Write-Host "      Carpeta existente: $cfgDir"
   }
 
-  Write-Host "[3/7] Cerrando proceso RustDesk si esta activo..."
+  Write-Host "[3/9] Buscando servicio de RustDesk..."
+  $rustDeskService = Get-RustDeskService
+  if ($null -ne $rustDeskService) {
+    Write-Host "      Servicio detectado: $($rustDeskService.Name) ($($rustDeskService.Status))"
+    if ($rustDeskService.Status -ne "Stopped") {
+      Write-Host "[4/9] Deteniendo servicio RustDesk..."
+      Stop-Service -Name $rustDeskService.Name -Force -ErrorAction Stop
+      (Get-Service -Name $rustDeskService.Name).WaitForStatus("Stopped", (New-TimeSpan -Seconds 20))
+      Write-Host "      Servicio detenido."
+    } else {
+      Write-Host "[4/9] Servicio ya estaba detenido."
+    }
+  } else {
+    Write-Host "[4/9] Servicio RustDesk no encontrado. Continuando..."
+  }
+
+  Write-Host "[5/9] Cerrando proceso RustDesk si esta activo..."
   Get-Process -Name "RustDesk" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
-  Write-Host "[4/7] Verificando archivo de configuracion..."
+  Write-Host "[6/9] Verificando archivo de configuracion..."
   if (!(Test-Path $cfgFile)) {
     Set-Content -Path $cfgFile -Value "" -Encoding UTF8
     Write-Host "      Archivo creado: $cfgFile"
@@ -95,22 +144,29 @@ try {
     Write-Host "      Archivo existente: $cfgFile"
   }
 
-  Write-Host "[5/7] Generando respaldo..."
+  Write-Host "[7/9] Generando respaldo..."
   $ts = Get-Date -Format "yyyyMMdd-HHmmss"
   $backupPath = "$cfgFile.bak-$ts"
   Copy-Item $cfgFile $backupPath -Force
   Write-Host "      Backup: $backupPath"
 
-  Write-Host "[6/7] Aplicando parametros en TOML..."
+  Write-Host "[8/9] Aplicando parametros en TOML..."
   $txt = Get-Content -Path $cfgFile -Raw -Encoding UTF8
   $txt = Update-TomlOptions $txt @{
     "custom-rendezvous-server" = $Rendezvous
     "relay-server" = $Relay
     "key" = $Key
-  }
+  } @("stop-service")
 
-  Write-Host "[7/7] Guardando archivo..."
+  Write-Host "[9/9] Guardando archivo..."
   Set-Content -Path $cfgFile -Value $txt -Encoding UTF8
+
+  if ($null -ne $rustDeskService) {
+    Write-Host "      Iniciando servicio RustDesk..."
+    Start-Service -Name $rustDeskService.Name -ErrorAction Stop
+    (Get-Service -Name $rustDeskService.Name).WaitForStatus("Running", (New-TimeSpan -Seconds 20))
+    Write-Host "      Servicio iniciado."
+  }
 
   Write-Host ""
   Write-Host "EXITO: Config aplicado en $cfgFile"
