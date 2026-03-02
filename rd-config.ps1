@@ -11,22 +11,64 @@ $Key        = "TU_PUBLIC_KEY"
 $cfgDir  = Join-Path $env:APPDATA "RustDesk"
 $cfgFile = Join-Path $cfgDir "RustDesk2.toml"
 
-function Set-TomlKey([string]$content, [string]$section, [string]$key, [string]$value) {
-  $safe = $value.Replace("\", "\\").Replace('"', '\"')
-  $secPattern = "(?ms)^\[$section\]\s*$.*?(?=^\[|\z)"
-  $m = [regex]::Match($content, $secPattern)
-  if (-not $m.Success) { return $content }
-
-  $block = $m.Value
-  $keyPattern = "(?m)^\s*$key\s*=\s*""[^""]*""\s*$"
-
-  if ([regex]::IsMatch($block, $keyPattern)) {
-    $block2 = [regex]::Replace($block, $keyPattern, "$key = ""$safe""")
-  } else {
-    $block2 = [regex]::Replace($block, "(?m)^\[$section\]\s*$", "[$section]`r`n$key = ""$safe""")
+function Update-TomlOptions([string]$content, [hashtable]$updates) {
+  $lines = @()
+  if ($null -ne $content -and $content.Length -gt 0) {
+    $lines = $content -split "`r?`n"
   }
 
-  return $content.Substring(0, $m.Index) + $block2 + $content.Substring($m.Index + $m.Length)
+  $sectionStart = -1
+  $sectionEnd = $lines.Count
+  for ($i = 0; $i -lt $lines.Count; $i++) {
+    if ($lines[$i] -match '^\s*\[options\]\s*$') {
+      $sectionStart = $i
+      for ($j = $i + 1; $j -lt $lines.Count; $j++) {
+        if ($lines[$j] -match '^\s*\[[^\]]+\]\s*$') {
+          $sectionEnd = $j
+          break
+        }
+      }
+      break
+    }
+  }
+
+  if ($sectionStart -eq -1) {
+    if ($lines.Count -gt 0 -and $lines[-1].Trim().Length -gt 0) {
+      $lines += ""
+    }
+    $lines += "[options]"
+    foreach ($k in $updates.Keys) {
+      $safe = ([string]$updates[$k]).Replace("\", "\\").Replace('"', '\"')
+      $lines += "$k = ""$safe"""
+    }
+  } else {
+    $found = @{}
+    foreach ($k in $updates.Keys) { $found[$k] = $false }
+
+    for ($i = $sectionStart + 1; $i -lt $sectionEnd; $i++) {
+      foreach ($k in $updates.Keys) {
+        if ($lines[$i] -match "^\s*$([regex]::Escape($k))\s*=") {
+          $safe = ([string]$updates[$k]).Replace("\", "\\").Replace('"', '\"')
+          $lines[$i] = "$k = ""$safe"""
+          $found[$k] = $true
+        }
+      }
+    }
+
+    [System.Collections.ArrayList]$list = @($lines)
+    $insertAt = $sectionStart + 1
+    foreach ($k in $updates.Keys) {
+      if (-not $found[$k]) {
+        $safe = ([string]$updates[$k]).Replace("\", "\\").Replace('"', '\"')
+        [void]$list.Insert($insertAt, "$k = ""$safe""")
+        $insertAt++
+        $sectionEnd++
+      }
+    }
+    $lines = @($list)
+  }
+
+  return ($lines -join "`r`n")
 }
 
 try {
@@ -61,13 +103,11 @@ try {
 
   Write-Host "[6/7] Aplicando parametros en TOML..."
   $txt = Get-Content -Path $cfgFile -Raw -Encoding UTF8
-  if ($txt -notmatch "(?m)^\[options\]\s*$") {
-    $txt = $txt.TrimEnd() + "`r`n`r`n[options]`r`n"
+  $txt = Update-TomlOptions $txt @{
+    "custom-rendezvous-server" = $Rendezvous
+    "relay-server" = $Relay
+    "key" = $Key
   }
-
-  $txt = Set-TomlKey $txt "options" "custom-rendezvous-server" $Rendezvous
-  $txt = Set-TomlKey $txt "options" "relay-server" $Relay
-  $txt = Set-TomlKey $txt "options" "key" $Key
 
   Write-Host "[7/7] Guardando archivo..."
   Set-Content -Path $cfgFile -Value $txt -Encoding UTF8
