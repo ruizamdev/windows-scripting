@@ -8,8 +8,7 @@ $Rendezvous = "TU_DOMINIO_O_IP"
 $Relay      = "TU_DOMINIO_O_IP"
 $Key        = "TU_PUBLIC_KEY"
 
-$cfgDir  = Join-Path (Join-Path $env:APPDATA "RustDesk") "config"
-$cfgFile = Join-Path $cfgDir "RustDesk2.toml"
+$cfgDirUser  = Join-Path (Join-Path $env:APPDATA "RustDesk") "config"
 
 function Update-TomlOptions([string]$content, [hashtable]$updates, [string[]]$removeKeys = @()) {
   $lines = @()
@@ -104,23 +103,62 @@ function Get-RustDeskService {
   return $svc
 }
 
+function Get-ServiceConfigDir([string]$serviceName) {
+  try {
+    $svcInfo = Get-CimInstance -ClassName Win32_Service -Filter "Name='$serviceName'" -ErrorAction Stop
+    $startName = $svcInfo.StartName
+  }
+  catch {
+    return $null
+  }
+
+  if ([string]::IsNullOrWhiteSpace($startName)) {
+    return $null
+  }
+
+  switch -Regex ($startName) {
+    "^(LocalService|NT AUTHORITY\\LocalService)$" {
+      return "C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config"
+    }
+    "^(NetworkService|NT AUTHORITY\\NetworkService)$" {
+      return "C:\Windows\ServiceProfiles\NetworkService\AppData\Roaming\RustDesk\config"
+    }
+    "^(LocalSystem|NT AUTHORITY\\SYSTEM)$" {
+      return "C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config"
+    }
+    "^[^\\]+\\[^\\]+$" {
+      $accountName = ($startName -split "\\")[-1]
+      try {
+        $profile = (Get-CimInstance Win32_UserProfile -ErrorAction Stop |
+          Where-Object { $_.LocalPath -like "*\$accountName" -and $_.Loaded -in @($true, $false) } |
+          Select-Object -First 1).LocalPath
+        if ($profile) {
+          return (Join-Path $profile "AppData\Roaming\RustDesk\config")
+        }
+      }
+      catch {
+        return $null
+      }
+    }
+  }
+
+  return $null
+}
+
 try {
   $ErrorActionPreference = "Stop"
 
   Write-Host "[1/9] Iniciando configuracion de RustDesk..."
 
-  Write-Host "[2/9] Verificando carpeta de configuracion..."
-  if (!(Test-Path $cfgDir)) {
-    New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
-    Write-Host "      Carpeta creada: $cfgDir"
-  } else {
-    Write-Host "      Carpeta existente: $cfgDir"
-  }
-
   Write-Host "[3/9] Buscando servicio de RustDesk..."
   $rustDeskService = Get-RustDeskService
+  $serviceCfgDir = $null
   if ($null -ne $rustDeskService) {
     Write-Host "      Servicio detectado: $($rustDeskService.Name) ($($rustDeskService.Status))"
+    $serviceCfgDir = Get-ServiceConfigDir $rustDeskService.Name
+    if ($serviceCfgDir) {
+      Write-Host "      Perfil de servicio detectado: $serviceCfgDir"
+    }
     if ($rustDeskService.Status -ne "Stopped") {
       Write-Host "[4/9] Deteniendo servicio RustDesk..."
       Stop-Service -Name $rustDeskService.Name -Force -ErrorAction Stop
@@ -136,41 +174,65 @@ try {
   Write-Host "[5/9] Cerrando proceso RustDesk si esta activo..."
   Get-Process -Name "RustDesk" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
-  Write-Host "[6/9] Verificando archivo de configuracion..."
-  if (!(Test-Path $cfgFile)) {
-    Set-Content -Path $cfgFile -Value "" -Encoding UTF8
-    Write-Host "      Archivo creado: $cfgFile"
-  } else {
-    Write-Host "      Archivo existente: $cfgFile"
+  $targetDirs = [System.Collections.Generic.List[string]]::new()
+  $targetDirs.Add($cfgDirUser)
+  if ($serviceCfgDir -and $serviceCfgDir -ne $cfgDirUser) {
+    $targetDirs.Add($serviceCfgDir)
   }
 
-  Write-Host "[7/9] Generando respaldo..."
-  $ts = Get-Date -Format "yyyyMMdd-HHmmss"
-  $backupPath = "$cfgFile.bak-$ts"
-  Copy-Item $cfgFile $backupPath -Force
-  Write-Host "      Backup: $backupPath"
+  Write-Host "[6/9] Aplicando configuracion en perfiles detectados..."
+  foreach ($cfgDir in $targetDirs) {
+    $cfgFile = Join-Path $cfgDir "RustDesk2.toml"
 
-  Write-Host "[8/9] Aplicando parametros en TOML..."
-  $txt = Get-Content -Path $cfgFile -Raw -Encoding UTF8
-  $txt = Update-TomlOptions $txt @{
-    "custom-rendezvous-server" = $Rendezvous
-    "relay-server" = $Relay
-    "key" = $Key
-    "allow-remote-config-modification" = "Y"
-  } @("stop-service")
+    if (!(Test-Path $cfgDir)) {
+      New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+      Write-Host "      Carpeta creada: $cfgDir"
+    } else {
+      Write-Host "      Carpeta existente: $cfgDir"
+    }
 
-  Write-Host "[9/9] Guardando archivo..."
-  Set-Content -Path $cfgFile -Value $txt -Encoding UTF8
+    if (!(Test-Path $cfgFile)) {
+      Set-Content -Path $cfgFile -Value "" -Encoding UTF8
+      Write-Host "      Archivo creado: $cfgFile"
+    } else {
+      Write-Host "      Archivo existente: $cfgFile"
+    }
+
+    $ts = Get-Date -Format "yyyyMMdd-HHmmss"
+    $backupPath = "$cfgFile.bak-$ts"
+    Copy-Item $cfgFile $backupPath -Force
+    Write-Host "      Backup: $backupPath"
+
+    $txt = Get-Content -Path $cfgFile -Raw -Encoding UTF8
+    $txt = Update-TomlOptions $txt @{
+      "custom-rendezvous-server" = $Rendezvous
+      "relay-server" = $Relay
+      "key" = $Key
+      "allow-remote-config-modification" = "Y"
+    } @("stop-service")
+
+    Set-Content -Path $cfgFile -Value $txt -Encoding UTF8
+    Write-Host "      Configuracion aplicada: $cfgFile"
+  }
 
   if ($null -ne $rustDeskService) {
-    Write-Host "      Iniciando servicio RustDesk..."
+    Write-Host "[7/9] Iniciando servicio RustDesk..."
     Start-Service -Name $rustDeskService.Name -ErrorAction Stop
     (Get-Service -Name $rustDeskService.Name).WaitForStatus("Running", (New-TimeSpan -Seconds 20))
     Write-Host "      Servicio iniciado."
   }
 
+  Write-Host "[8/9] Validando escritura final..."
+  foreach ($cfgDir in $targetDirs) {
+    $cfgFile = Join-Path $cfgDir "RustDesk2.toml"
+    if (Test-Path $cfgFile) {
+      Write-Host "      OK: $cfgFile"
+    }
+  }
+
+  Write-Host "[9/9] Proceso finalizado."
   Write-Host ""
-  Write-Host "EXITO: Config aplicado en $cfgFile"
+  Write-Host "EXITO: Configuracion aplicada en perfiles de usuario y servicio (si existe)."
   Write-Host "Esta ventana se cerrara en 7 segundos..."
   Start-Sleep -Seconds 7
 }
