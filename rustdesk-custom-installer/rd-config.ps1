@@ -8,7 +8,53 @@ $Rendezvous = "TU_DOMINIO_O_IP"
 $Relay      = "TU_DOMINIO_O_IP"
 $Key        = "TU_PUBLIC_KEY"
 
-$cfgDirUser  = Join-Path (Join-Path $env:APPDATA "RustDesk") "config"
+function Add-UniquePath([System.Collections.Generic.List[string]]$list, [string]$path) {
+  if ([string]::IsNullOrWhiteSpace($path)) { return }
+  $normalized = [System.IO.Path]::GetFullPath($path.Trim())
+  foreach ($existing in $list) {
+    if ([string]::Equals($existing, $normalized, [System.StringComparison]::OrdinalIgnoreCase)) {
+      return
+    }
+  }
+  $list.Add($normalized) | Out-Null
+}
+
+function Read-TextFileUtf8([string]$path) {
+  if (!(Test-Path $path)) { return "" }
+  return [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
+}
+
+function Write-TextFileUtf8NoBom([string]$path, [string]$content) {
+  $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+  [System.IO.File]::WriteAllText($path, $content, $utf8NoBom)
+}
+
+function Get-UserConfigDirs {
+  $dirs = [System.Collections.Generic.List[string]]::new()
+
+  if ($env:APPDATA) {
+    Add-UniquePath $dirs (Join-Path (Join-Path $env:APPDATA "RustDesk") "config")
+  }
+
+  try {
+    $profiles = Get-CimInstance Win32_UserProfile -ErrorAction Stop |
+      Where-Object {
+        $_.LocalPath -and
+        $_.SID -like "S-1-5-21-*" -and
+        $_.Special -eq $false
+      }
+
+    foreach ($profile in $profiles) {
+      $cfgDir = Join-Path $profile.LocalPath "AppData\Roaming\RustDesk\config"
+      Add-UniquePath $dirs $cfgDir
+    }
+  }
+  catch {
+    Write-Host "      Aviso: no se pudieron enumerar perfiles de usuario desde CIM."
+  }
+
+  return $dirs
+}
 
 function Update-TomlOptions([string]$content, [hashtable]$updates, [string[]]$removeKeys = @()) {
   $lines = @()
@@ -103,46 +149,76 @@ function Get-RustDeskService {
   return $svc
 }
 
-function Get-ServiceConfigDir([string]$serviceName) {
+function Get-ServiceConfigDirs([string]$serviceName) {
+  $dirs = [System.Collections.Generic.List[string]]::new()
+
+  Add-UniquePath $dirs "C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config"
+  Add-UniquePath $dirs "C:\Windows\ServiceProfiles\NetworkService\AppData\Roaming\RustDesk\config"
+  Add-UniquePath $dirs "C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config"
+  Add-UniquePath $dirs "C:\ProgramData\RustDesk\config"
+
+  if ([string]::IsNullOrWhiteSpace($serviceName)) {
+    return $dirs
+  }
+
   try {
     $svcInfo = Get-CimInstance -ClassName Win32_Service -Filter "Name='$serviceName'" -ErrorAction Stop
     $startName = $svcInfo.StartName
   }
   catch {
-    return $null
+    return $dirs
   }
 
   if ([string]::IsNullOrWhiteSpace($startName)) {
-    return $null
+    return $dirs
   }
 
   switch -Regex ($startName) {
     "^(LocalService|NT AUTHORITY\\LocalService)$" {
-      return "C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config"
+      Add-UniquePath $dirs "C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config"
     }
     "^(NetworkService|NT AUTHORITY\\NetworkService)$" {
-      return "C:\Windows\ServiceProfiles\NetworkService\AppData\Roaming\RustDesk\config"
+      Add-UniquePath $dirs "C:\Windows\ServiceProfiles\NetworkService\AppData\Roaming\RustDesk\config"
     }
     "^(LocalSystem|NT AUTHORITY\\SYSTEM)$" {
-      return "C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config"
+      Add-UniquePath $dirs "C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config"
     }
     "^[^\\]+\\[^\\]+$" {
+      $domainPart = ($startName -split "\\")[0]
       $accountName = ($startName -split "\\")[-1]
+
+      if ([string]::Equals($domainPart, "NT SERVICE", [System.StringComparison]::OrdinalIgnoreCase)) {
+        Add-UniquePath $dirs (Join-Path "C:\Windows\ServiceProfiles" (Join-Path $accountName "AppData\Roaming\RustDesk\config"))
+        break
+      }
+
       try {
         $profile = (Get-CimInstance Win32_UserProfile -ErrorAction Stop |
-          Where-Object { $_.LocalPath -like "*\$accountName" -and $_.Loaded -in @($true, $false) } |
+          Where-Object {
+            $_.LocalPath -and
+            $_.LocalPath -match "\\$([Regex]::Escape($accountName))$"
+          } |
           Select-Object -First 1).LocalPath
-        if ($profile) {
-          return (Join-Path $profile "AppData\Roaming\RustDesk\config")
+        if ($profile -and (Test-Path $profile)) {
+          Add-UniquePath $dirs (Join-Path $profile "AppData\Roaming\RustDesk\config")
         }
       }
       catch {
-        return $null
+        # Ignore, keep known fallback directories.
       }
     }
   }
 
-  return $null
+  return $dirs
+}
+
+function Test-TomlKeys([string]$content, [string[]]$keys) {
+  foreach ($k in $keys) {
+    if ($content -notmatch ("(?m)^\s*" + [Regex]::Escape($k) + "\s*=")) {
+      return $false
+    }
+  }
+  return $true
 }
 
 try {
@@ -152,12 +228,12 @@ try {
 
   Write-Host "[3/9] Buscando servicio de RustDesk..."
   $rustDeskService = Get-RustDeskService
-  $serviceCfgDir = $null
+  $serviceCfgDirs = [System.Collections.Generic.List[string]]::new()
   if ($null -ne $rustDeskService) {
     Write-Host "      Servicio detectado: $($rustDeskService.Name) ($($rustDeskService.Status))"
-    $serviceCfgDir = Get-ServiceConfigDir $rustDeskService.Name
-    if ($serviceCfgDir) {
-      Write-Host "      Perfil de servicio detectado: $serviceCfgDir"
+    $serviceCfgDirs = Get-ServiceConfigDirs $rustDeskService.Name
+    foreach ($dir in $serviceCfgDirs) {
+      Write-Host "      Ruta candidata de servicio: $dir"
     }
     if ($rustDeskService.Status -ne "Stopped") {
       Write-Host "[4/9] Deteniendo servicio RustDesk..."
@@ -174,13 +250,24 @@ try {
   Write-Host "[5/9] Cerrando proceso RustDesk si esta activo..."
   Get-Process -Name "RustDesk" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
+  $userCfgDirs = Get-UserConfigDirs
   $targetDirs = [System.Collections.Generic.List[string]]::new()
-  $targetDirs.Add($cfgDirUser)
-  if ($serviceCfgDir -and $serviceCfgDir -ne $cfgDirUser) {
-    $targetDirs.Add($serviceCfgDir)
+  foreach ($dir in $userCfgDirs) { Add-UniquePath $targetDirs $dir }
+  foreach ($dir in $serviceCfgDirs) { Add-UniquePath $targetDirs $dir }
+
+  if ($targetDirs.Count -eq 0) {
+    throw "No se detectaron rutas destino para RustDesk."
   }
 
   Write-Host "[6/9] Aplicando configuracion en perfiles detectados..."
+  $updatedFiles = [System.Collections.Generic.List[string]]::new()
+  $expectedKeys = @(
+    "custom-rendezvous-server",
+    "relay-server",
+    "key",
+    "allow-remote-config-modification"
+  )
+
   foreach ($cfgDir in $targetDirs) {
     $cfgFile = Join-Path $cfgDir "RustDesk2.toml"
 
@@ -192,7 +279,7 @@ try {
     }
 
     if (!(Test-Path $cfgFile)) {
-      Set-Content -Path $cfgFile -Value "" -Encoding UTF8
+      Write-TextFileUtf8NoBom -Path $cfgFile -content ""
       Write-Host "      Archivo creado: $cfgFile"
     } else {
       Write-Host "      Archivo existente: $cfgFile"
@@ -203,7 +290,7 @@ try {
     Copy-Item $cfgFile $backupPath -Force
     Write-Host "      Backup: $backupPath"
 
-    $txt = Get-Content -Path $cfgFile -Raw -Encoding UTF8
+    $txt = Read-TextFileUtf8 -Path $cfgFile
     $txt = Update-TomlOptions $txt @{
       "custom-rendezvous-server" = $Rendezvous
       "relay-server" = $Relay
@@ -211,8 +298,15 @@ try {
       "allow-remote-config-modification" = "Y"
     } @("stop-service")
 
-    Set-Content -Path $cfgFile -Value $txt -Encoding UTF8
-    Write-Host "      Configuracion aplicada: $cfgFile"
+    Write-TextFileUtf8NoBom -Path $cfgFile -content $txt
+
+    $finalText = Read-TextFileUtf8 -Path $cfgFile
+    if (Test-TomlKeys $finalText $expectedKeys) {
+      $updatedFiles.Add($cfgFile) | Out-Null
+      Write-Host "      Configuracion aplicada: $cfgFile"
+    } else {
+      throw "El archivo no contiene todas las claves esperadas tras escribir: $cfgFile"
+    }
   }
 
   if ($null -ne $rustDeskService) {
@@ -223,11 +317,8 @@ try {
   }
 
   Write-Host "[8/9] Validando escritura final..."
-  foreach ($cfgDir in $targetDirs) {
-    $cfgFile = Join-Path $cfgDir "RustDesk2.toml"
-    if (Test-Path $cfgFile) {
-      Write-Host "      OK: $cfgFile"
-    }
+  foreach ($cfgFile in $updatedFiles) {
+    Write-Host "      OK: $cfgFile"
   }
 
   Write-Host "[9/9] Proceso finalizado."
