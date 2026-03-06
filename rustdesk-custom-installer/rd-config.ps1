@@ -346,12 +346,22 @@ try {
     Write-Host "      Backup: $backupPath"
 
     $txt = Read-TextFileUtf8 -Path $cfgFile
-    $txt = Update-TomlOptions $txt @{
-      "custom-rendezvous-server" = $Rendezvous
-      "relay-server" = $Relay
-      "key" = $Key
-      "allow-remote-config-modification" = "Y"
-    } @("stop-service")
+  $txt = Update-TomlOptions $txt @{
+    "custom-rendezvous-server" = $Rendezvous
+    "relay-server" = $Relay
+    "key" = $Key
+    "allow-remote-config-modification" = "Y"
+    "enable-udp-punch" = "Y"
+    "enable-abr" = "Y"
+    "enable-hwcodec" = "Y"
+    "image-quality" = "balanced"
+    "custom-fps" = "30"
+    "codec-preference" = "vp9"
+    "allow-remove-wallpaper" = "Y"
+    "disable-audio" = "Y"
+    "i444" = "N"
+    "show-quality-monitor" = "Y"
+  } @("stop-service")
 
     Write-TextFileUtf8NoBom -Path $cfgFile -content $txt
 
