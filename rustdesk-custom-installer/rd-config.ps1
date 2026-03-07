@@ -434,21 +434,7 @@ try {
       throw "El archivo no contiene todas las claves esperadas tras escribir: $cfgFile"
     }
 
-    $localCfgFile = Join-Path $cfgDir "RustDesk_local.toml"
-    if (!(Test-Path $localCfgFile)) {
-      Write-TextFileUtf8NoBom -Path $localCfgFile -content ""
-      Write-Host "      Archivo local creado: $localCfgFile"
-    } else {
-      Write-Host "      Archivo local existente: $localCfgFile"
-    }
-
-    $localTs = Get-Date -Format "yyyyMMdd-HHmmss"
-    $localBackupPath = "$localCfgFile.bak-$localTs"
-    Copy-Item $localCfgFile $localBackupPath -Force
-    Write-Host "      Backup local: $localBackupPath"
-
-    $localTxt = Read-TextFileUtf8 -Path $localCfgFile
-    $localTxt = Update-TomlRootOptions $localTxt @{
+    $localUpdates = @{
       "enable-udp-punch" = "Y"
       "enable-abr" = "Y"
       "enable-hwcodec" = "Y"
@@ -460,13 +446,38 @@ try {
       "i444" = "N"
       "show-quality-monitor" = "Y"
     }
-    Write-TextFileUtf8NoBom -Path $localCfgFile -content $localTxt
+    $localKeys = @("enable-udp-punch","enable-abr","enable-hwcodec","image-quality","custom-fps","codec-preference","allow-remove-wallpaper","disable-audio","i444","show-quality-monitor")
+    $localTargetNames = @("RustDesk_local.toml", "RustDesk.toml", "RustDesk_default.toml")
 
-    if (Test-TomlRootKeys (Read-TextFileUtf8 -Path $localCfgFile) @("enable-udp-punch","enable-abr","enable-hwcodec","image-quality","custom-fps","codec-preference","allow-remove-wallpaper","disable-audio","i444","show-quality-monitor")) {
-      $updatedFiles.Add($localCfgFile) | Out-Null
-      Write-Host "      Configuracion local aplicada: $localCfgFile"
-    } else {
-      throw "No se pudieron validar todas las claves locales en: $localCfgFile"
+    foreach ($localName in $localTargetNames) {
+      $localCfgFile = Join-Path $cfgDir $localName
+      if (!(Test-Path $localCfgFile)) {
+        Write-TextFileUtf8NoBom -Path $localCfgFile -content ""
+        Write-Host "      Archivo local creado: $localCfgFile"
+      } else {
+        Write-Host "      Archivo local existente: $localCfgFile"
+      }
+
+      $localTs = Get-Date -Format "yyyyMMdd-HHmmss"
+      $localBackupPath = "$localCfgFile.bak-$localTs"
+      Copy-Item $localCfgFile $localBackupPath -Force
+      Write-Host "      Backup local: $localBackupPath"
+
+      $localTxt = Read-TextFileUtf8 -Path $localCfgFile
+      # Compatibilidad entre versiones: escribir en raiz y en [options].
+      $localTxt = Update-TomlRootOptions $localTxt $localUpdates
+      $localTxt = Update-TomlOptions $localTxt $localUpdates
+      Write-TextFileUtf8NoBom -Path $localCfgFile -content $localTxt
+
+      $localFinal = Read-TextFileUtf8 -Path $localCfgFile
+      $hasRoot = Test-TomlRootKeys $localFinal $localKeys
+      $hasOptions = Test-TomlKeys $localFinal $localKeys
+      if ($hasRoot -or $hasOptions) {
+        $updatedFiles.Add($localCfgFile) | Out-Null
+        Write-Host "      Configuracion local aplicada: $localCfgFile"
+      } else {
+        throw "No se pudieron validar las claves locales en: $localCfgFile"
+      }
     }
   }
 
