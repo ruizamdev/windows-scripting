@@ -139,6 +139,65 @@ function Update-TomlOptions([string]$content, [hashtable]$updates, [string[]]$re
   return ($lines -join "`r`n")
 }
 
+function Update-TomlRootOptions([string]$content, [hashtable]$updates) {
+  $lines = @()
+  if ($null -ne $content -and $content.Length -gt 0) {
+    $lines = $content -split "`r?`n"
+  }
+
+  $firstSectionIndex = $lines.Count
+  for ($i = 0; $i -lt $lines.Count; $i++) {
+    if ($lines[$i] -match '^\s*\[[^\]]+\]\s*$') {
+      $firstSectionIndex = $i
+      break
+    }
+  }
+
+  $rootLines = @()
+  if ($firstSectionIndex -gt 0) {
+    $rootLines = @($lines[0..($firstSectionIndex - 1)])
+  }
+
+  $tailLines = @()
+  if ($firstSectionIndex -lt $lines.Count) {
+    $tailLines = @($lines[$firstSectionIndex..($lines.Count - 1)])
+  }
+
+  $found = @{}
+  foreach ($k in $updates.Keys) { $found[$k] = $false }
+
+  [System.Collections.ArrayList]$rootOut = @()
+  foreach ($line in $rootLines) {
+    if ($line -match '^\s*([A-Za-z0-9_.-]+)\s*=') {
+      $currentKey = $matches[1]
+      if ($updates.ContainsKey($currentKey)) {
+        $safe = ([string]$updates[$currentKey]).Replace("\", "\\").Replace('"', '\"')
+        [void]$rootOut.Add("$currentKey = ""$safe""")
+        $found[$currentKey] = $true
+        continue
+      }
+    }
+    [void]$rootOut.Add($line)
+  }
+
+  $added = 0
+  foreach ($k in $updates.Keys) {
+    if (-not $found[$k]) {
+      if ($added -eq 0 -and $rootOut.Count -gt 0 -and $rootOut[$rootOut.Count - 1].Trim().Length -gt 0) {
+        [void]$rootOut.Add("")
+      }
+      $safe = ([string]$updates[$k]).Replace("\", "\\").Replace('"', '\"')
+      [void]$rootOut.Add("$k = ""$safe""")
+      $added++
+    }
+  }
+
+  if ($tailLines.Count -gt 0 -and $rootOut.Count -gt 0 -and $rootOut[$rootOut.Count - 1].Trim().Length -gt 0 -and $tailLines[0].Trim().Length -gt 0) {
+    [void]$rootOut.Add("")
+  }
+
+  return ((@($rootOut) + @($tailLines)) -join "`r`n")
+}
 function Get-RustDeskService {
   $svc = Get-Service -Name "RustDesk*" -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($null -eq $svc) {
@@ -253,6 +312,28 @@ function Get-ServiceConfigDirs([string]$serviceName) {
   return $dirs
 }
 
+function Test-TomlRootKeys([string]$content, [string[]]$keys) {
+  $lines = @()
+  if ($null -ne $content -and $content.Length -gt 0) {
+    $lines = $content -split "`r?`n"
+  }
+
+  $root = [System.Collections.ArrayList]::new()
+  foreach ($line in $lines) {
+    if ($line -match '^\s*\[[^\]]+\]\s*$') {
+      break
+    }
+    [void]$root.Add($line)
+  }
+
+  $rootText = (@($root) -join "`r`n")
+  foreach ($k in $keys) {
+    if ($rootText -notmatch ("(?m)^\s*" + [Regex]::Escape($k) + "\s*=")) {
+      return $false
+    }
+  }
+  return $true
+}
 function Test-TomlKeys([string]$content, [string[]]$keys) {
   foreach ($k in $keys) {
     if ($content -notmatch ("(?m)^\s*" + [Regex]::Escape($k) + "\s*=")) {
@@ -362,7 +443,7 @@ try {
     Write-Host "      Backup local: $localBackupPath"
 
     $localTxt = Read-TextFileUtf8 -Path $localCfgFile
-    $localTxt = Update-TomlOptions $localTxt @{
+    $localTxt = Update-TomlRootOptions $localTxt @{
       "enable-udp-punch" = "Y"
       "enable-abr" = "Y"
       "enable-hwcodec" = "Y"
@@ -376,7 +457,7 @@ try {
     }
     Write-TextFileUtf8NoBom -Path $localCfgFile -content $localTxt
 
-    if (Test-TomlKeys (Read-TextFileUtf8 -Path $localCfgFile) @("enable-udp-punch","enable-abr","enable-hwcodec","image-quality","custom-fps","codec-preference","allow-remove-wallpaper","disable-audio","i444","show-quality-monitor")) {
+    if (Test-TomlRootKeys (Read-TextFileUtf8 -Path $localCfgFile) @("enable-udp-punch","enable-abr","enable-hwcodec","image-quality","custom-fps","codec-preference","allow-remove-wallpaper","disable-audio","i444","show-quality-monitor")) {
       $updatedFiles.Add($localCfgFile) | Out-Null
       Write-Host "      Configuracion local aplicada: $localCfgFile"
     } else {
