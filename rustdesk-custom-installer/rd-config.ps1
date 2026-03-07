@@ -349,11 +349,24 @@ try {
   Write-Host "[1/9] Iniciando configuracion de RustDesk..."
 
   Write-Host "[3/9] Buscando servicio de RustDesk..."
-  $rustDeskService = Get-RustDeskService
+  $rustDeskService = $null
+  $detectDeadline = (Get-Date).AddSeconds(60)
+  while ((Get-Date) -lt $detectDeadline) {
+    $rustDeskService = Get-RustDeskService
+    if ($null -ne $rustDeskService) { break }
+    Start-Sleep -Seconds 2
+  }
+
   $serviceCfgDirs = [System.Collections.Generic.List[string]]::new()
+  foreach ($dir in (Get-ServiceConfigDirs $null)) {
+    Add-UniquePath $serviceCfgDirs $dir
+  }
+
   if ($null -ne $rustDeskService) {
     Write-Host "      Servicio detectado: $($rustDeskService.Name) ($($rustDeskService.Status))"
-    $serviceCfgDirs = Get-ServiceConfigDirs $rustDeskService.Name
+    foreach ($dir in (Get-ServiceConfigDirs $rustDeskService.Name)) {
+      Add-UniquePath $serviceCfgDirs $dir
+    }
     foreach ($dir in $serviceCfgDirs) {
       Write-Host "      Ruta candidata de servicio: $dir"
     }
@@ -371,7 +384,10 @@ try {
       Write-Host "[4/9] Servicio ya estaba detenido."
     }
   } else {
-    Write-Host "[4/9] Servicio RustDesk no encontrado. Continuando..."
+    Write-Host "[4/9] Servicio RustDesk no detectado tras 60 s. Se aplicara config en rutas de servicio conocidas."
+    foreach ($dir in $serviceCfgDirs) {
+      Write-Host "      Ruta candidata de servicio: $dir"
+    }
   }
 
   Write-Host "[5/9] No se cerraran procesos de RustDesk; solo se controla su servicio."
