@@ -348,18 +348,24 @@ try {
 
   Write-Host "[1/9] Iniciando configuracion de RustDesk..."
 
-  Write-Host "[3/9] Buscando servicio de RustDesk y esperando inicializacion..."
-  $rustDeskService = Wait-RustDeskServiceReady -SettleSeconds 8
+  Write-Host "[3/9] Buscando servicio de RustDesk..."
+  $rustDeskService = Get-RustDeskService
   $serviceCfgDirs = [System.Collections.Generic.List[string]]::new()
   if ($null -ne $rustDeskService) {
+    Write-Host "      Servicio detectado: $($rustDeskService.Name) ($($rustDeskService.Status))"
     $serviceCfgDirs = Get-ServiceConfigDirs $rustDeskService.Name
     foreach ($dir in $serviceCfgDirs) {
       Write-Host "      Ruta candidata de servicio: $dir"
     }
+
     if ($rustDeskService.Status -ne "Stopped") {
-      Write-Host "[4/9] Deteniendo servicio RustDesk..."
-      Stop-Service -Name $rustDeskService.Name -Force -ErrorAction Stop
-      (Get-Service -Name $rustDeskService.Name).WaitForStatus("Stopped", (New-TimeSpan -Seconds 20))
+      Write-Host "[4/9] Deteniendo servicio RustDesk (sin -Force)..."
+      Stop-Service -Name $rustDeskService.Name -ErrorAction Stop
+      while ($true) {
+        $svcState = Get-Service -Name $rustDeskService.Name -ErrorAction SilentlyContinue
+        if ($null -ne $svcState -and $svcState.Status -eq "Stopped") { break }
+        Start-Sleep -Seconds 2
+      }
       Write-Host "      Servicio detenido."
     } else {
       Write-Host "[4/9] Servicio ya estaba detenido."
@@ -368,8 +374,7 @@ try {
     Write-Host "[4/9] Servicio RustDesk no encontrado. Continuando..."
   }
 
-  Write-Host "[5/9] Cerrando proceso RustDesk si esta activo..."
-  Get-Process -Name "RustDesk" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  Write-Host "[5/9] No se cerraran procesos de RustDesk; solo se controla su servicio."
 
   $userCfgDirs = Get-UserConfigDirs
   $targetDirs = [System.Collections.Generic.List[string]]::new()
@@ -468,7 +473,11 @@ try {
   if ($null -ne $rustDeskService) {
     Write-Host "[7/9] Iniciando servicio RustDesk..."
     Start-Service -Name $rustDeskService.Name -ErrorAction Stop
-    (Get-Service -Name $rustDeskService.Name).WaitForStatus("Running", (New-TimeSpan -Seconds 20))
+    while ($true) {
+      $svcState = Get-Service -Name $rustDeskService.Name -ErrorAction SilentlyContinue
+      if ($null -ne $svcState -and $svcState.Status -eq "Running") { break }
+      Start-Sleep -Seconds 2
+    }
     Write-Host "      Servicio iniciado."
   }
 
