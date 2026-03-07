@@ -20,3 +20,4 @@ Source: "rd-config.ps1"; DestDir: "{tmp}"; Flags: ignoreversion deleteafterinsta
 ; Ajusta /S, /quiet, etc. segun soporte de tu instalador
 Filename: "{tmp}\rustdesk.exe"; Parameters: "--silent-install"; Flags: waituntilterminated; StatusMsg: "Instalando RustDesk..."
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{tmp}\rd-config.ps1"""; Flags: waituntilterminated; StatusMsg: "Aplicando configuracion..."
+Filename: "{autopf}\RustDesk\RustDesk.exe"; Parameters: ""; Flags: nowait postinstall skipifsilent runasoriginaluser; StatusMsg: "Abriendo interfaz de RustDesk..."
