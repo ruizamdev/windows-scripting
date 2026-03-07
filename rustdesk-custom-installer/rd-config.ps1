@@ -346,22 +346,12 @@ try {
     Write-Host "      Backup: $backupPath"
 
     $txt = Read-TextFileUtf8 -Path $cfgFile
-  $txt = Update-TomlOptions $txt @{
-    "custom-rendezvous-server" = $Rendezvous
-    "relay-server" = $Relay
-    "key" = $Key
-    "allow-remote-config-modification" = "Y"
-    "enable-udp-punch" = "Y"
-    "enable-abr" = "Y"
-    "enable-hwcodec" = "Y"
-    "image-quality" = "balanced"
-    "custom-fps" = "30"
-    "codec-preference" = "vp9"
-    "allow-remove-wallpaper" = "Y"
-    "disable-audio" = "Y"
-    "i444" = "N"
-    "show-quality-monitor" = "Y"
-  } @("stop-service")
+    $txt = Update-TomlOptions $txt @{
+      "custom-rendezvous-server" = $Rendezvous
+      "relay-server" = $Relay
+      "key" = $Key
+      "allow-remote-config-modification" = "Y"
+    } @("stop-service")
 
     Write-TextFileUtf8NoBom -Path $cfgFile -content $txt
 
@@ -371,6 +361,41 @@ try {
       Write-Host "      Configuracion aplicada: $cfgFile"
     } else {
       throw "El archivo no contiene todas las claves esperadas tras escribir: $cfgFile"
+    }
+
+    $localCfgFile = Join-Path $cfgDir "RustDesk_local.toml"
+    if (!(Test-Path $localCfgFile)) {
+      Write-TextFileUtf8NoBom -Path $localCfgFile -content ""
+      Write-Host "      Archivo local creado: $localCfgFile"
+    } else {
+      Write-Host "      Archivo local existente: $localCfgFile"
+    }
+
+    $localTs = Get-Date -Format "yyyyMMdd-HHmmss"
+    $localBackupPath = "$localCfgFile.bak-$localTs"
+    Copy-Item $localCfgFile $localBackupPath -Force
+    Write-Host "      Backup local: $localBackupPath"
+
+    $localTxt = Read-TextFileUtf8 -Path $localCfgFile
+    $localTxt = Update-TomlOptions $localTxt @{
+      "enable-udp-punch" = "Y"
+      "enable-abr" = "Y"
+      "enable-hwcodec" = "Y"
+      "image-quality" = "balanced"
+      "custom-fps" = "30"
+      "codec-preference" = "vp9"
+      "allow-remove-wallpaper" = "Y"
+      "disable-audio" = "Y"
+      "i444" = "N"
+      "show-quality-monitor" = "Y"
+    }
+    Write-TextFileUtf8NoBom -Path $localCfgFile -content $localTxt
+
+    if (Test-TomlKeys (Read-TextFileUtf8 -Path $localCfgFile) @("enable-udp-punch","enable-abr","enable-hwcodec","image-quality","custom-fps","codec-preference","allow-remove-wallpaper","disable-audio","i444","show-quality-monitor")) {
+      $updatedFiles.Add($localCfgFile) | Out-Null
+      Write-Host "      Configuracion local aplicada: $localCfgFile"
+    } else {
+      throw "No se pudieron validar todas las claves locales en: $localCfgFile"
     }
   }
 
