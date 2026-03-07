@@ -348,13 +348,13 @@ try {
 
   Write-Host "[1/9] Iniciando configuracion de RustDesk..."
 
-  Write-Host "[3/9] Buscando servicio de RustDesk..."
+  Write-Host "[3/9] Buscando servicio de RustDesk (sin timeout)..."
   $rustDeskService = $null
-  $detectDeadline = (Get-Date).AddSeconds(60)
-  while ((Get-Date) -lt $detectDeadline) {
+  while ($null -eq $rustDeskService) {
     $rustDeskService = Get-RustDeskService
-    if ($null -ne $rustDeskService) { break }
-    Start-Sleep -Seconds 2
+    if ($null -eq $rustDeskService) {
+      Start-Sleep -Seconds 2
+    }
   }
 
   $serviceCfgDirs = [System.Collections.Generic.List[string]]::new()
@@ -362,33 +362,35 @@ try {
     Add-UniquePath $serviceCfgDirs $dir
   }
 
-  if ($null -ne $rustDeskService) {
-    Write-Host "      Servicio detectado: $($rustDeskService.Name) ($($rustDeskService.Status))"
-    foreach ($dir in (Get-ServiceConfigDirs $rustDeskService.Name)) {
-      Add-UniquePath $serviceCfgDirs $dir
+  Write-Host "      Servicio detectado: $($rustDeskService.Name) ($($rustDeskService.Status))"
+  foreach ($dir in (Get-ServiceConfigDirs $rustDeskService.Name)) {
+    Add-UniquePath $serviceCfgDirs $dir
+  }
+  foreach ($dir in $serviceCfgDirs) {
+    Write-Host "      Ruta candidata de servicio: $dir"
+  }
+
+  Write-Host "[4/9] Deteniendo servicio RustDesk (obligatorio, sin timeout)..."
+  while ($true) {
+    $svcState = Get-Service -Name $rustDeskService.Name -ErrorAction SilentlyContinue
+    if ($null -eq $svcState) {
+      throw "No se pudo consultar el estado del servicio RustDesk durante la detencion."
     }
-    foreach ($dir in $serviceCfgDirs) {
-      Write-Host "      Ruta candidata de servicio: $dir"
+    if ($svcState.Status -eq "Stopped") {
+      break
     }
 
-    if ($rustDeskService.Status -ne "Stopped") {
-      Write-Host "[4/9] Deteniendo servicio RustDesk (sin -Force)..."
-      Stop-Service -Name $rustDeskService.Name -ErrorAction Stop
-      while ($true) {
-        $svcState = Get-Service -Name $rustDeskService.Name -ErrorAction SilentlyContinue
-        if ($null -ne $svcState -and $svcState.Status -eq "Stopped") { break }
-        Start-Sleep -Seconds 2
+    if ($svcState.Status -ne "StopPending") {
+      try {
+        Stop-Service -Name $rustDeskService.Name -ErrorAction SilentlyContinue
       }
-      Write-Host "      Servicio detenido."
-    } else {
-      Write-Host "[4/9] Servicio ya estaba detenido."
+      catch {
+        # Reintento continuo hasta que quede detenido.
+      }
     }
-  } else {
-    Write-Host "[4/9] Servicio RustDesk no detectado tras 60 s. Se aplicara config en rutas de servicio conocidas."
-    foreach ($dir in $serviceCfgDirs) {
-      Write-Host "      Ruta candidata de servicio: $dir"
-    }
+    Start-Sleep -Seconds 2
   }
+  Write-Host "      Servicio detenido."
 
   Write-Host "[5/9] No se cerraran procesos de RustDesk; solo se controla su servicio."
 
@@ -407,12 +409,13 @@ try {
     "custom-rendezvous-server",
     "relay-server",
     "key",
-    "allow-remote-config-modification"
+    "allow-remote-config-modification",
+    "allow-remove-wallpaper"
   )
+  $serverRootKeys = @("rendezvous_server", "relay_server")
+  $serverTargetNames = @("RustDesk2.toml", "RustDesk.toml", "RustDesk_default.toml")
 
   foreach ($cfgDir in $targetDirs) {
-    $cfgFile = Join-Path $cfgDir "RustDesk2.toml"
-
     if (!(Test-Path $cfgDir)) {
       New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
       Write-Host "      Carpeta creada: $cfgDir"
@@ -420,34 +423,45 @@ try {
       Write-Host "      Carpeta existente: $cfgDir"
     }
 
-    if (!(Test-Path $cfgFile)) {
-      Write-TextFileUtf8NoBom -Path $cfgFile -content ""
-      Write-Host "      Archivo creado: $cfgFile"
-    } else {
-      Write-Host "      Archivo existente: $cfgFile"
-    }
+    foreach ($serverName in $serverTargetNames) {
+      $cfgFile = Join-Path $cfgDir $serverName
 
-    $ts = Get-Date -Format "yyyyMMdd-HHmmss"
-    $backupPath = "$cfgFile.bak-$ts"
-    Copy-Item $cfgFile $backupPath -Force
-    Write-Host "      Backup: $backupPath"
+      if (!(Test-Path $cfgFile)) {
+        Write-TextFileUtf8NoBom -Path $cfgFile -content ""
+        Write-Host "      Archivo server creado: $cfgFile"
+      } else {
+        Write-Host "      Archivo server existente: $cfgFile"
+      }
 
-    $txt = Read-TextFileUtf8 -Path $cfgFile
-    $txt = Update-TomlOptions $txt @{
-      "custom-rendezvous-server" = $Rendezvous
-      "relay-server" = $Relay
-      "key" = $Key
-      "allow-remote-config-modification" = "Y"
-    } @("stop-service")
+      $ts = Get-Date -Format "yyyyMMdd-HHmmss"
+      $backupPath = "$cfgFile.bak-$ts"
+      Copy-Item $cfgFile $backupPath -Force
+      Write-Host "      Backup server: $backupPath"
 
-    Write-TextFileUtf8NoBom -Path $cfgFile -content $txt
+      $txt = Read-TextFileUtf8 -Path $cfgFile
+      $txt = Update-TomlRootOptions $txt @{
+        "rendezvous_server" = $Rendezvous
+        "relay_server" = $Relay
+      }
+      $txt = Update-TomlOptions $txt @{
+        "custom-rendezvous-server" = $Rendezvous
+        "relay-server" = $Relay
+        "key" = $Key
+        "allow-remote-config-modification" = "Y"
+        "allow-remove-wallpaper" = "Y"
+      } @("stop-service")
 
-    $finalText = Read-TextFileUtf8 -Path $cfgFile
-    if (Test-TomlKeys $finalText $expectedKeys) {
-      $updatedFiles.Add($cfgFile) | Out-Null
-      Write-Host "      Configuracion aplicada: $cfgFile"
-    } else {
-      throw "El archivo no contiene todas las claves esperadas tras escribir: $cfgFile"
+      Write-TextFileUtf8NoBom -Path $cfgFile -content $txt
+
+      $finalText = Read-TextFileUtf8 -Path $cfgFile
+      $hasServerRoot = Test-TomlRootKeys $finalText $serverRootKeys
+      $hasServerOptions = Test-TomlKeys $finalText $expectedKeys
+      if ($hasServerRoot -and $hasServerOptions) {
+        $updatedFiles.Add($cfgFile) | Out-Null
+        Write-Host "      Configuracion server aplicada: $cfgFile"
+      } else {
+        throw "No se pudieron validar claves server en: $cfgFile"
+      }
     }
 
     $localUpdates = @{
@@ -463,7 +477,7 @@ try {
       "show-quality-monitor" = "Y"
     }
     $localKeys = @("enable-udp-punch","enable-abr","enable-hwcodec","image-quality","custom-fps","codec-preference","allow-remove-wallpaper","disable-audio","i444","show-quality-monitor")
-    $localTargetNames = @("RustDesk_local.toml", "RustDesk.toml", "RustDesk_default.toml")
+    $localTargetNames = @("RustDesk_local.toml")
 
     foreach ($localName in $localTargetNames) {
       $localCfgFile = Join-Path $cfgDir $localName
