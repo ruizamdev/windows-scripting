@@ -150,39 +150,28 @@ function Get-RustDeskService {
 }
 
 function Wait-RustDeskServiceReady(
-  [int]$DetectionTimeoutSeconds = 90,
-  [int]$RunningTimeoutSeconds = 90,
   [int]$SettleSeconds = 8
 ) {
-  $detectDeadline = (Get-Date).AddSeconds($DetectionTimeoutSeconds)
   $svc = $null
 
-  while ((Get-Date) -lt $detectDeadline) {
+  while ($true) {
     $svc = Get-RustDeskService
-    if ($null -ne $svc) {
-      break
-    }
+    if ($null -ne $svc) { break }
     Start-Sleep -Seconds 2
-  }
-
-  if ($null -eq $svc) {
-    Write-Host "      Aviso: no se detecto servicio RustDesk dentro de $DetectionTimeoutSeconds s."
-    return $null
   }
 
   Write-Host "      Servicio detectado: $($svc.Name) ($($svc.Status))"
 
   if ($svc.Status -ne "Running") {
     Write-Host "      Esperando a que el servicio RustDesk quede en ejecucion..."
-    try {
-      Start-Service -Name $svc.Name -ErrorAction SilentlyContinue
-    }
-    catch {
-      # Ignore and continue polling service status.
-    }
+    while ($true) {
+      try {
+        Start-Service -Name $svc.Name -ErrorAction SilentlyContinue
+      }
+      catch {
+        # Ignore and continue polling service status.
+      }
 
-    $runningDeadline = (Get-Date).AddSeconds($RunningTimeoutSeconds)
-    while ((Get-Date) -lt $runningDeadline) {
       $svc = Get-Service -Name $svc.Name -ErrorAction SilentlyContinue
       if ($null -ne $svc -and $svc.Status -eq "Running") {
         break
@@ -191,10 +180,6 @@ function Wait-RustDeskServiceReady(
     }
   } else {
     $svc = Get-Service -Name $svc.Name -ErrorAction SilentlyContinue
-  }
-
-  if ($null -eq $svc -or $svc.Status -ne "Running") {
-    throw "El servicio RustDesk no alcanzo estado Running en $RunningTimeoutSeconds s."
   }
 
   if ($SettleSeconds -gt 0) {
@@ -283,7 +268,7 @@ try {
   Write-Host "[1/9] Iniciando configuracion de RustDesk..."
 
   Write-Host "[3/9] Buscando servicio de RustDesk y esperando inicializacion..."
-  $rustDeskService = Wait-RustDeskServiceReady -DetectionTimeoutSeconds 90 -RunningTimeoutSeconds 90 -SettleSeconds 8
+  $rustDeskService = Wait-RustDeskServiceReady -SettleSeconds 8
   $serviceCfgDirs = [System.Collections.Generic.List[string]]::new()
   if ($null -ne $rustDeskService) {
     $serviceCfgDirs = Get-ServiceConfigDirs $rustDeskService.Name
